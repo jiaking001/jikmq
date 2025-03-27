@@ -1,37 +1,35 @@
-package main
+package jikmq
 
 import (
 	"context"
-	"fmt"
 	"github.com/go-redis/redis/v8"
-	"log"
-	"time"
 )
 
-func main() {
-	// 创建 Redis 客户端
-	client := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6350", // Redis 服务器地址
-		Password: "",               // 密码（如果有的话）
-		DB:       0,                // 使用默认数据库
-	})
+// Producer 生产者
+type Producer struct {
+	client *redis.Client
+}
 
-	// Stream 名称
-	streamName := "myStream"
-
-	// 发送消息
-	for i := 0; i < 10; i++ {
-		message := fmt.Sprintf("Message %d", i)
-		_, err := client.XAdd(context.Background(), &redis.XAddArgs{
-			Stream: streamName,
-			Values: map[string]interface{}{
-				"message": message,
-			},
-		}).Result()
-		if err != nil {
-			log.Fatalf("Failed to add message to stream: %v", err)
-		}
-		fmt.Printf("Produced: %s\n", message)
-		time.Sleep(1 * time.Second)
+func NewProducer(client *redis.Client) *Producer {
+	p := Producer{
+		client: client,
 	}
+	return &p
+}
+
+// SendMsg 生产一条消息
+func (p *Producer) SendMsg(ctx context.Context, topic, key, val string) (string, error) {
+	// 使用 XAdd 命令将消息添加到 Redis Stream
+	id, err := p.client.XAdd(ctx, &redis.XAddArgs{
+		Stream: topic,
+		Values: map[string]interface{}{
+			key: val,
+		},
+		MaxLen: 10,    // 设置队列的最大容纳量
+		Approx: false, // 是否使用近似值，false 表示精确值
+	}).Result()
+	if err != nil {
+		return "", err
+	}
+	return id, nil
 }

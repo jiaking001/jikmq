@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"github.com/go-redis/redis/v8"
-	"log"
 )
 
 // Consumer 消费者
@@ -20,19 +19,21 @@ func NewConsumer(client *redis.Client) *Consumer {
 }
 
 // ConsumeMsg 消费一条消息
-func (c *Consumer) ConsumeMsg(ctx context.Context, topic, group, consumer string) ([]redis.XMessage, error) {
-	result, err := c.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+func (c *Consumer) ConsumeMsg(ctx context.Context, topic, group, consumer string) ([]redis.XStream, error) {
+	msgs, err := c.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 		Group:    group,
 		Consumer: consumer,
 		Streams:  []string{topic, ">"},
-		Count:    1,
+		Count:    1,    // 每次消费一条消息
 		Block:    1000, // 阻塞 1000 毫秒
 	}).Result()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			// 超时，没有新消息
-		}
-		log.Fatalf("Failed to read from stream: %v", err)
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, err
 	}
-	return result[0].Messages, nil
+	return msgs, nil
+}
+
+// AckMsg 确认消息
+func (c *Consumer) AckMsg(ctx context.Context, topic, group string, ids []string) error {
+	return c.client.XAck(ctx, topic, group, ids...).Err()
 }

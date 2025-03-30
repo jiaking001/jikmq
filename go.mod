@@ -1,4 +1,4 @@
-module github.com/jiaking001/jikmq
+module jikmq
 
 go 1.23.2
 

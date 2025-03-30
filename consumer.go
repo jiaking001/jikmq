@@ -8,7 +8,16 @@ import (
 )
 
 // MsgCallback 接收到消息后执行的回调函数
-type MsgCallback func(ctx context.Context, msg redis.XStream) error
+type MsgCallback func(ctx context.Context, msg MsgEntity) error
+
+// DeadLetterMailbox 死信队列
+type DeadLetterMailbox func(ctx context.Context, msg MsgEntity) error
+
+// MsgEntity 消息类
+type MsgEntity struct {
+	MsgID string
+	Val   interface{}
+}
 
 // Consumer 消费者
 type Consumer struct {
@@ -24,12 +33,15 @@ type Consumer struct {
 
 	consumer string // 消费者
 
-	failureCnts map[interface{}]int // 各消息累计失败次数
+	failureCnt map[MsgEntity]int // 各消息累计失败次数
 
 	callbackFunc MsgCallback // 接收到 msg 时执行的回调函数，由使用方定义
+
+	deadLetterMailbox DeadLetterMailbox // 死信队列，由使用方自定义实现
 }
 
-func NewConsumer(client *redis.Client, topic, group, consumer string, callbackFunc MsgCallback) *Consumer {
+// NewConsumer 创建新的消费者
+func NewConsumer(client *redis.Client, topic, group, consumer string, callbackFunc MsgCallback, deadLetterMailbox DeadLetterMailbox) *Consumer {
 	ctx, stop := context.WithCancel(context.Background())
 
 	c := Consumer{
@@ -37,7 +49,7 @@ func NewConsumer(client *redis.Client, topic, group, consumer string, callbackFu
 
 		ctx: ctx,
 
-		stop: stop,
+		stop: stop, // 用于停止消费
 
 		topic: topic, // Stream 名称
 
@@ -45,7 +57,11 @@ func NewConsumer(client *redis.Client, topic, group, consumer string, callbackFu
 
 		consumer: consumer, // 消费者
 
+		failureCnt: make(map[MsgEntity]int), // 各消息累计失败次数
+
 		callbackFunc: callbackFunc, // 接收到 msg 时执行的回调函数，由使用方定义
+
+		deadLetterMailbox: deadLetterMailbox, // 死信队列，由使用方自定义实现
 	}
 
 	go c.run()
@@ -68,41 +84,65 @@ func (c *Consumer) run() {
 		}
 
 		// 接收最新的消息
-		msgs, err := c.consumeMsg()
+		msg, err := c.consumeMsg()
 		if err != nil {
 			log.Printf("receive msg failed, err: %v", err)
 			continue
 		}
 
 		// 接收消息成功后处理消息
-		c.handlerMsgs(c.ctx, msgs)
+		c.handlerMsg(c.ctx, msg)
+
+		// 死信队列投递
+		c.deliverDeadLetter(c.ctx)
 	}
 
 }
 
-// 处理接收到的消息
-func (c *Consumer) handlerMsgs(ctx context.Context, msgs []redis.XStream) {
-	for _, msg := range msgs {
-		// 执行回调函数
-		if err := c.callbackFunc(ctx, msg); err != nil {
-			// 失败计数器累加
-			c.failureCnts[msg.Messages[0].Values["key"]]++
+// 死信队列投递
+func (c *Consumer) deliverDeadLetter(ctx context.Context) {
+	// 对于失败达到指定次数的消息，投递到死信中，然后执行 ack
+	for msg, failureCnt := range c.failureCnt {
+		if failureCnt < 2 {
 			continue
 		}
-		// callback 执行成功，进行 ack
-		if err := c.ackMsg(msg.Messages[0].ID); err != nil {
-			log.Printf("msg ack failed, msg id: %s, err: %v", msg.Messages[0].ID, err)
+
+		// 投递死信队列
+		if err := c.deadLetterMailbox(ctx, msg); err != nil {
+			log.Printf("dead letter deliver failed, msg id: %s, err: %v", msg, err)
+		}
+
+		if err := c.ackMsg(msg.MsgID); err != nil {
+			log.Printf("msg ack failed, msg id: %s, err: %v", msg.MsgID, err)
 			continue
 		}
 
 		// 消费成功清空计数器
-		delete(c.failureCnts, msg.Messages[0].Values["key"])
+		delete(c.failureCnt, msg)
 	}
 }
 
+// 处理接收到的消息
+func (c *Consumer) handlerMsg(ctx context.Context, msg MsgEntity) {
+	// 执行回调函数
+	if err := c.callbackFunc(ctx, msg); err != nil {
+		// 失败计数器累加
+		c.failureCnt[msg]++
+		return
+	}
+	// callback 执行成功，进行 ack
+	if err := c.ackMsg(msg.MsgID); err != nil {
+		log.Printf("msg ack failed, msg id: %s, err: %v", msg.MsgID, err)
+		return
+	}
+
+	// 消费成功清空计数器
+	delete(c.failureCnt, msg)
+}
+
 // ConsumeMsg 消费一条消息
-func (c *Consumer) consumeMsg() ([]redis.XStream, error) {
-	msgs, err := c.client.XReadGroup(c.ctx, &redis.XReadGroupArgs{
+func (c *Consumer) consumeMsg() (MsgEntity, error) {
+	msg, err := c.client.XReadGroup(c.ctx, &redis.XReadGroupArgs{
 		Group:    c.group,
 		Consumer: c.consumer,
 		Streams:  []string{c.topic, ">"},
@@ -110,9 +150,13 @@ func (c *Consumer) consumeMsg() ([]redis.XStream, error) {
 		Block:    1000, // 阻塞 1000 毫秒
 	}).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
-		return nil, err
+		return MsgEntity{}, err
 	}
-	return msgs, nil
+
+	return MsgEntity{
+		MsgID: msg[0].Messages[0].ID,
+		Val:   msg[0].Messages[0].Values["key"],
+	}, nil
 }
 
 // AckMsg 确认消息

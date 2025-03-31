@@ -34,12 +34,12 @@ func (p *Producer) SetApprox(approx bool) {
 }
 
 // SendMsg 生产一条消息
-func (p *Producer) SendMsg(ctx context.Context, topic, key, val string) (string, error) {
+func (p *Producer) SendMsg(ctx context.Context, topic, val string) (string, error) {
 	// 使用 XAdd 命令将消息添加到 Redis Stream
 	id, err := p.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: topic,
 		Values: map[string]interface{}{
-			key: val,
+			"key": val,
 		},
 		MaxLen: p.maxLen, // 设置队列的最大容纳量
 		Approx: p.approx, // 是否使用近似值，false 表示精确值

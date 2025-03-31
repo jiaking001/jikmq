@@ -17,7 +17,7 @@ type Producer struct {
 func NewProducer(client *redis.Client) *Producer {
 	p := Producer{
 		client: client,
-		maxLen: 10,    // 设置队列的最大容纳量
+		maxLen: 1000,  // 设置队列的最大容纳量
 		approx: false, // 是否使用近似值，false 表示精确值
 	}
 	return &p

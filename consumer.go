@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/go-redis/redis/v8"
 	"log"
+	"time"
 )
 
 // MsgCallback 接收到消息后执行的回调函数
@@ -83,8 +84,8 @@ func (c *Consumer) run() {
 		default:
 		}
 
-		// 接收最新的消息
-		msg, err := c.consumeMsg()
+		// 接收最新的消息,没有消息时阻塞防止空转
+		msg, err := c.consumeMsg(">", 0)
 		if err != nil {
 			log.Printf("receive msg failed, err: %v", err)
 			continue
@@ -95,6 +96,16 @@ func (c *Consumer) run() {
 
 		// 死信队列投递
 		c.deliverDeadLetter(c.ctx)
+
+		// 处理未ACK的老消息
+		msg, err = c.consumeMsg("0-0", -1)
+		if err != nil {
+			log.Printf("receive msg failed, err: %v", err)
+			continue
+		}
+
+		// 接收消息成功后处理消息
+		c.handlerMsg(c.ctx, msg)
 	}
 
 }
@@ -124,6 +135,10 @@ func (c *Consumer) deliverDeadLetter(ctx context.Context) {
 
 // 处理接收到的消息
 func (c *Consumer) handlerMsg(ctx context.Context, msg MsgEntity) {
+	if msg.MsgID == "" && msg.Val == nil {
+		// 没有消息
+		return
+	}
 	// 执行回调函数
 	if err := c.callbackFunc(ctx, msg); err != nil {
 		// 失败计数器累加
@@ -141,16 +156,20 @@ func (c *Consumer) handlerMsg(ctx context.Context, msg MsgEntity) {
 }
 
 // ConsumeMsg 消费一条消息
-func (c *Consumer) consumeMsg() (MsgEntity, error) {
+func (c *Consumer) consumeMsg(s string, m time.Duration) (MsgEntity, error) {
 	msg, err := c.client.XReadGroup(c.ctx, &redis.XReadGroupArgs{
 		Group:    c.group,
 		Consumer: c.consumer,
-		Streams:  []string{c.topic, ">"},
-		Count:    1,    // 每次消费一条消息
-		Block:    1000, // 阻塞 1000 毫秒
+		Streams:  []string{c.topic, s},
+		Count:    1, // 每次消费一条消息
+		Block:    m, // 阻塞
 	}).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return MsgEntity{}, err
+	}
+
+	if len(msg) == 0 || len(msg[0].Messages) == 0 {
+		return MsgEntity{}, nil
 	}
 
 	return MsgEntity{
